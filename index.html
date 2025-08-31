@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jeu Balle Vocal - Tessiture Personnalisée</title>
+  <style>
+    body, html {
+      margin: 0; padding: 0; height: 100%; font-family: Arial, sans-serif;
+      background: #222; color: #eee; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    }
+    #menu {
+      text-align: center;
+      background: #333;
+      padding: 20px;
+      border-radius: 12px;
+      box-shadow: 0 0 15px #00f;
+      max-width: 350px;
+      width: 90%;
+    }
+    label {
+      display: block;
+      margin: 10px 0 5px 0;
+      font-weight: bold;
+    }
+    select {
+      width: 100%;
+      padding: 8px;
+      font-size: 16px;
+      border-radius: 6px;
+      border: none;
+      margin-bottom: 15px;
+      background: #444;
+      color: #eee;
+    }
+    button {
+      background-color: #00aaff;
+      border: none;
+      color: white;
+      padding: 12px 20px;
+      font-size: 18px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background-color 0.3s ease;
+      width: 100%;
+    }
+    button:hover {
+      background-color: #0088cc;
+    }
+    #gameContainer {
+      display: none;
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: #111;
+    }
+    canvas {
+      display: block;
+      margin: 0 auto;
+      background: #222;
+      border: 2px solid #00aaff;
+      border-radius: 10px;
+    }
+    #noteDisplay {
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 48px;
+      font-weight: bold;
+      color: #0ff;
+      text-shadow: 0 0 10px #0ff;
+      pointer-events: none;
+    }
+    #scoreDisplay {
+      position: absolute;
+      top: 10px;
+      right: 20px;
+      font-size: 24px;
+      color: #0f0;
+      font-weight: bold;
+      user-select: none;
+    }
+  </style>
+</head>
+<body>
+
+<div id="menu">
+  <h1>Jeu Balle Vocal</h1>
+  <p>Choisis ta tessiture vocale :</p>
+  
+  <label for="lowestNote">Note la plus basse :</label>
+  <select id="lowestNote"></select>
+  
+  <label for="highestNote">Note la plus haute :</label>
+  <select id="highestNote"></select>
+  
+  <button id="startGameBtn">Démarrer le jeu</button>
+  <p style="font-size: 0.8em; margin-top: 10px; color: #aaa;">(Utilise le microphone et chante la note affichée pour faire passer la balle)</p>
+</div>
+
+<div id="gameContainer">
+  <canvas id="gameCanvas" width="600" height="400"></canvas>
+  <div id="noteDisplay"></div>
+  <div id="scoreDisplay">Score: 0</div>
+</div>
+
+<script>
+(() => {
+  // --- Notes françaises avec dièses (#) et bémols (♭)
+  // Convention: les notes sont stock en notation internationale pour la fréquence, mais on affiche en français
+  const noteNamesFr = {
+    'C': 'do',
+    'C#': 'do#',
+    'Db': 'ré♭',
+    'D': 'ré',
+    'D#': 'ré#',
+    'Eb': 'mi♭',
+    'E': 'mi',
+    'F': 'fa',
+    'F#': 'fa#',
+    'Gb': 'sol♭',
+    'G': 'sol',
+    'G#': 'sol#',
+    'Ab': 'la♭',
+    'A': 'la',
+    'A#': 'la#',
+    'Bb': 'si♭',
+    'B': 'si',
+  };
+
+  // Liste ordonnée des notes chromatiques par octave (12 notes)
+  // Chaque note est un objet {nameIntl, nameFr, freq}
+  // Calcul de la fréquence selon formule standard (A4=440Hz)
+  function noteFreq(note, octave) {
+    // note: 'C', 'C#', etc.
+    const A4 = 440;
+    // Distance en demi-tons de la note par rapport à A4
+    const semitonesMap = {
+      'C': -9, 'C#': -8, 'Db': -8, 'D': -7, 'D#': -6, 'Eb': -6, 'E': -5,
+      'F': -4, 'F#': -3, 'Gb': -3, 'G': -2, 'G#': -1, 'Ab': -1, 'A': 0,
+      'A#': 1, 'Bb': 1, 'B': 2
+    };
+    const semitonesFromA4 = semitonesMap[note] + 12 * (octave - 4);
+    return A4 * Math.pow(2, semitonesFromA4 / 12);
+  }
+
+  // Construire toutes les notes d'une octave
+  const chromaticNotes = [
+    ['C','do'], ['C#','do#'], ['Db','ré♭'], ['D','ré'], ['D#','ré#'], ['Eb','mi♭'],
+    ['E','mi'], ['F','fa'], ['F#','fa#'], ['Gb','sol♭'], ['G','sol'], ['G#','sol#'],
+    ['Ab','la♭'], ['A','la'], ['A#','la#'], ['Bb','si♭'], ['B','si']
+  ];
+
+  // En pratique, pour éviter doublons (ex: C# et Db), on utilisera une liste unique de notes par octave, en choisissant dièse ou bémol selon préférence.
+  // Ici, on va garder les notes naturelles et dièses, et mapper les bémols vers les dièses équivalents.
+  // Exemple : Db = C#, Eb = D#, Gb = F#, Ab = G#, Bb = A#
+
+  // Map bémols vers dièses équivalents pour fréquence
+  const flatsToSharps = {
+    'Db': 'C#',
+    'Eb': 'D#',
+    'Gb': 'F#',
+    'Ab': 'G#',
+    'Bb': 'A#'
+  };
+
+  // Construire une liste unique de notes chromatiques par octave (12 notes)
+  const uniqueNotesInOctave = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+
+  // Générer toutes les notes sur toutes les octaves (de 0 à 8)
+  let allNotes = [];
+  for(let octave=0; octave<=8; octave++){
+    uniqueNotesInOctave.forEach(note=>{
+      allNotes.push({
+        nameIntl: note,
+        nameFr: noteNamesFr[note],
+        octave: octave,
+        freq: noteFreq(note, octave)
+      });
+    });
+  }
+
+  // --- Utilitaires pour la tessiture ---
+
+  // Trouver l'index d'une note complète (ex "do4", "fa#3") dans allNotes
+  // notation attendue: noteFr (ex: "do", "ré♭", "fa#") + octave number
+  function findNoteIndex(noteFrOct) {
+    // Parse note et octave
+    let m = noteFrOct.match(/^([a-g](?:#|♭)?)(\d)$/i);
+    if(!m) return -1;
+    let [_, noteFrRaw, octaveStr] = m;
+    noteFrRaw = noteFrRaw.toLowerCase();
+
+    // Trouver le nom international correspondant
+    let nameIntl = null;
+    for(const [intl, fr] of Object.entries(noteNamesFr)){
+      if(fr.toLowerCase() === noteFrRaw){
+        nameIntl = intl;
+        break;
+      }
+    }
+    if(!nameIntl) return -1;
+
+    let octave = parseInt(octaveStr, 10);
+
+    // Chercher dans allNotes
+    return allNotes.findIndex(n=>n.nameIntl === nameIntl && n.octave === octave);
+  }
+
+  // Générer options <option> pour les selects de notes, du plus bas au plus haut
+  function generateNoteOptions() {
+    // Limiter octaves visibles pour ne pas surcharger
+    const minOctave = 1;
+    const maxOctave = 7;
+
+    let options = [];
+    allNotes.forEach(note=>{
+      if(note.octave >= minOctave && note.octave <= maxOctave){
+        let fr = note.nameFr;
+        let label = fr + note.octave;
+        options.push({label, value: label});
+      }
+    });
+    return options;
+  }
+
+  // --- Variables globales ---
+
+  const menuDiv = document.getElementById('menu');
+  const gameContainer = document.getElementById('gameContainer');
+  const startGameBtn = document.getElementById('startGameBtn');
+  const lowestNoteSelect = document.getElementById('lowestNote');
+  const highestNoteSelect = document.getElementById('highestNote');
+  const noteDisplay = document.getElementById('noteDisplay');
+  const scoreDisplay = document.getElementById('scoreDisplay');
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+
+  let tessiture = {minIndex: 0, maxIndex: allNotes.length - 1};
+  let currentNoteIndex = 0;
+  let score = 0;
+
+  // --- Audio pitch detection setup ---
+  let audioContext, analyser, microphone, dataArray;
+  let isDetecting = false;
+
+  // --- Game objects ---
+  let ball = {x: 50, y: 200, radius: 15, vy: 0};
+  let obstacles = [];
+  let obstacleSpeed = 2;
+  let frameCount = 0;
+
+  // --- Constants ---
+  const gravity = 0.5;
+  const lift = -10;
+
+  // --- Setup options menus ---
+
+  function populateNoteSelects() {
+    let options = generateNoteOptions();
+    options.forEach(opt => {
+      let optEl1 = document.createElement('option');
+      optEl1.value = opt.value;
+      optEl1.textContent = opt.label;
+      lowestNoteSelect.appendChild(optEl1);
+
+      let optEl2 = document.createElement('option');
+      optEl2.value = opt.value;
+      optEl2.textContent = opt.label;
+      highestNoteSelect.appendChild(optEl2);
+    });
+
+    // Par défaut : min = do3, max = do5
+    lowestNoteSelect.value = 'do3';
+    highestNoteSelect.value = 'do5';
+  }
+
+  // --- Note display ---
+
+  function freqToNoteIndex(freq) {
+    // Trouver la note la plus proche
+    let minDiff = Infinity;
+    let closestIndex = -1;
+    for(let i = tessiture.minIndex; i <= tessiture.maxIndex; i++){
+      let diff = Math.abs(freq - allNotes[i].freq);
+      if(diff < minDiff){
+        minDiff = diff;
+        closestIndex = i;
+      }
+    }
+    return closestIndex;
+  }
+
+  // --- Converti note index en affichage français (ex : "fa#", "ré♭" + octave)
+  function noteIndexToFrLabel(index) {
+    if(index < tessiture.minIndex || index > tessiture.maxIndex) return '';
+    const note = allNotes[index];
+    return note.nameFr + note.octave;
+  }
+
+  // --- Génère une note cible aléatoire dans la tessiture
+  function randomTargetNote() {
+    return Math.floor(Math.random() * (tessiture.maxIndex - tessiture.minIndex + 1)) + tessiture.minIndex;
+  }
+
+  // --- Initialisation audio (pitch detection) ---
+  async function initAudio() {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+      microphone = audioContext.createMediaStreamSource(stream);
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 2048;
+      microphone.connect(analyser);
+      dataArray = new Float32Array(analyser.fftSize);
+      isDetecting = true;
+      detectPitch();
+    } catch (e) {
+      alert("Microphone non accessible : " + e.message);
+    }
+  }
+
+  // --- Auto-correlation pitch detection ---
+  function autoCorrelate(buffer, sampleRate) {
+    // Implementation based on Chris Wilson's pitch detection example
+    let SIZE = buffer.length;
+    let MAX_SAMPLES = Math.floor(SIZE/2);
+    let bestOffset = -1;
+    let bestCorrelation = 0;
+    let rms = 0;
+    let foundGoodCorrelation = false;
+    let correlations = new Array(MAX_SAMPLES);
+
+    for(let i=0; i<SIZE; i++){
+      let val = buffer[i];
+      rms += val*val;
+    }
+    rms = Math.sqrt(rms/SIZE);
+    if(rms<0.01) return -1;
+
+    let lastCorrelation = 1;
+    for(let offset=0; offset<MAX_SAMPLES; offset++){
+      let correlation = 0;
+      for(let i=0; i<MAX_SAMPLES; i++){
+        correlation += Math.abs(buffer[i] - buffer[i+offset]);
+      }
+      correlation = 1 - correlation/MAX_SAMPLES;
+      correlations[offset] = correlation;
+      if(correlation > 0.9 && correlation > lastCorrelation){
+        foundGoodCorrelation = true;
+        if(correlation > bestCorrelation){
+          bestCorrelation = correlation;
+          bestOffset = offset;
+        }
+      } else if(foundGoodCorrelation){
+        let shift = (correlations[bestOffset+1] - correlations[bestOffset-1])/correlations[bestOffset];
+        return sampleRate/(bestOffset + 8*shift);
+      }
+      lastCorrelation = correlation;
+    }
+    if(bestCorrelation > 0.01){
+      return sampleRate/bestOffset;
+    }
+    return -1;
+  }
+
+  // --- Detect pitch continuously ---
+  function detectPitch() {
+    if(!isDetecting) return;
+    analyser.getFloatTimeDomainData(dataArray);
+    let pitch = autoCorrelate(dataArray, audioContext.sampleRate);
+    if(pitch != -1) {
+      onPitchDetected(pitch);
+    }
+    requestAnimationFrame(detectPitch);
+  }
+
+  // --- Variables de jeu ---
+  let targetNoteIndex;
+  let ballY;
+  let ballVY;
+  let obstaclesArray = [];
+
+  // --- Gestion du jeu ---
+
+  function startGame() {
+    score = 0;
+    scoreDisplay.textContent = 'Score: 0';
+    ball.x = 50;
+    ball.y = canvas.height / 2;
+    ball.vy = 0;
+    obstacles = [];
+    frame
