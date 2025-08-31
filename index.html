@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Voice Pitch Ball Game</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #111;
+      color: #fff;
+      font-family: sans-serif;
+      overflow: hidden;
+    }
+    canvas {
+      display: block;
+      background: #222;
+    }
+    #info {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 10;
+      font-size: 16px;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas" width="800" height="600"></canvas>
+  <div id="info">
+    🎵 Note détectée : <span id="currentNote">--</span><br>
+    🎯 Note cible : <span id="targetNote">--</span><br>
+    🧠 Fréquence : <span id="frequency">--</span> Hz
+  </div>
+
+  <script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    let ballY = canvas.height / 2;
+    let velocity = 0;
+    let gravity = 0.3;
+    let obstacles = [];
+    let frameCount = 0;
+    let score = 0;
+    let targetNote = 'A4';
+    let targetFreq = 440;
+
+    function getRandomTarget() {
+      const notes = [
+        { note: 'C4', freq: 261.63 },
+        { note: 'D4', freq: 293.66 },
+        { note: 'E4', freq: 329.63 },
+        { note: 'F4', freq: 349.23 },
+        { note: 'G4', freq: 392.00 },
+        { note: 'A4', freq: 440.00 },
+        { note: 'B4', freq: 493.88 },
+        { note: 'C5', freq: 523.25 }
+      ];
+      return notes[Math.floor(Math.random() * notes.length)];
+    }
+
+    function drawBall() {
+      ctx.beginPath();
+      ctx.arc(100, ballY, 15, 0, Math.PI * 2);
+      ctx.fillStyle = "#0f0";
+      ctx.fill();
+      ctx.closePath();
+    }
+
+    function drawObstacles() {
+      ctx.fillStyle = "#f00";
+      obstacles.forEach(o => {
+        ctx.fillRect(o.x, 0, o.width, o.gapY - o.gapHeight / 2);
+        ctx.fillRect(o.x, o.gapY + o.gapHeight / 2, o.width, canvas.height);
+      });
+    }
+
+    function updateObstacles() {
+      if (frameCount % 150 === 0) {
+        let gapY = Math.random() * (canvas.height - 200) + 100;
+        obstacles.push({
+          x: canvas.width,
+          width: 50,
+          gapY: gapY,
+          gapHeight: 120
+        });
+
+        const newTarget = getRandomTarget();
+        targetNote = newTarget.note;
+        targetFreq = newTarget.freq;
+        document.getElementById('targetNote').textContent = targetNote;
+      }
+
+      obstacles.forEach(o => o.x -= 2);
+      obstacles = obstacles.filter(o => o.x + o.width > 0);
+    }
+
+    function detectCollision() {
+      for (let o of obstacles) {
+        if (o.x < 100 + 15 && o.x + o.width > 100 - 15) {
+          if (ballY < o.gapY - o.gapHeight / 2 || ballY > o.gapY + o.gapHeight / 2) {
+            alert('💥 Game Over ! Score : ' + score);
+            document.location.reload();
+          } else {
+            score++;
+          }
+        }
+      }
+    }
+
+    function gameLoop() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      velocity += gravity;
+      ballY += velocity;
+
+      if (ballY > canvas.height) ballY = canvas.height;
+      if (ballY < 0) ballY = 0;
+
+      drawBall();
+      drawObstacles();
+      updateObstacles();
+      detectCollision();
+
+      frameCount++;
+      requestAnimationFrame(gameLoop);
+    }
+
+    gameLoop();
+
+    // 🎤 Audio pitch detection
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const analyser = audioCtx.createAnalyser();
+      const mic = audioCtx.createMediaStreamSource(stream);
+      mic.connect(analyser);
+      analyser.fftSize = 2048;
+      const buffer = new Float32Array(analyser.fftSize);
+
+      function autoCorrelate(buf, sampleRate) {
+        let SIZE = buf.length;
+        let rms = 0;
+        for (let i = 0; i < SIZE; i++) {
+          let val = buf[i];
+          rms += val * val;
+        }
+        rms = Math.sqrt(rms / SIZE);
+        if (rms < 0.01) return -1;
+
+        let r1 = 0, r2 = SIZE - 1, threshold = 0.2;
+        for (let i = 0; i < SIZE / 2; i++) {
+          if (Math.abs(buf[i]) < threshold) {
+            r1 = i;
+            break;
+          }
+        }
+        for (let i = 1; i < SIZE / 2; i++) {
+          if (Math.abs(buf[SIZE - i]) < threshold) {
+            r2 = SIZE - i;
+            break;
+          }
+        }
+
+        buf = buf.slice(r1, r2);
+        SIZE = buf.length;
+
+        let c = new Array(SIZE).fill(0);
+        for (let i = 0; i < SIZE; i++) {
+          for (let j = 0; j < SIZE - i; j++) {
+            c[i] = c[i] + buf[j] * buf[j + i];
+          }
+        }
+
+        let d = 0;
+        while (c[d] > c[d + 1]) d++;
+        let maxval = -1, maxpos = -1;
+        for (let i = d; i < SIZE; i++) {
+          if (c[i] > maxval) {
+            maxval = c[i];
+            maxpos = i;
+          }
+        }
+
+        let T0 = maxpos;
+        return sampleRate / T0;
+      }
+
+      function updatePitch() {
+        analyser.getFloatTimeDomainData(buffer);
+        let pitch = autoCorrelate(buffer, audioCtx.sampleRate);
+        if (pitch !== -1) {
+          document.getElementById('frequency').textContent = pitch.toFixed(1);
+          let distance = pitch - targetFreq;
+          ballY = canvas.height / 2 - distance * 0.5;
+          document.getElementById('currentNote').textContent = getNoteFromFrequency(pitch);
+        }
+        requestAnimationFrame(updatePitch);
+      }
+
+      updatePitch();
+    });
+
+    function getNoteFromFrequency(freq) {
+      const noteStrings = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
+      const noteNum = 12 * (Math.log(freq / 440) / Math.log(2));
+      const noteIndex = Math.round(noteNum) + 69;
+      const octave = Math.floor(noteIndex / 12) - 1;
+      const noteName = noteStrings[noteIndex % 12];
+      return noteName + octave;
+    }
+  </script>
+</body>
+</html>
