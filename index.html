@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Jeu Balle et Notes - Tessiture personnalisée</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@600&display=swap');
+  body, html {
+    margin: 0; padding: 0; height: 100%;
+    font-family: 'Montserrat', sans-serif;
+    background: linear-gradient(135deg, #f9d423 0%, #ff4e50 100%);
+    color: #222;
+    overflow: hidden;
+    display: flex; flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  body::before {
+    content: "♩ ♪ ♫ ♬ ♭ ♯";
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    font-size: 8vw;
+    color: rgba(0,0,0,0.05);
+    display: flex; flex-wrap: wrap; align-content: center; justify-content: center;
+    pointer-events: none;
+    user-select: none;
+    z-index: 0;
+  }
+  #menu {
+    z-index: 10;
+    background: rgba(0,0,0,0.7);
+    padding: 30px 40px;
+    border-radius: 15px;
+    color: #fff;
+    max-width: 400px;
+    text-align: center;
+    box-shadow: 0 0 20px rgba(0,0,0,0.8);
+  }
+  h1 {
+    margin-bottom: 20px;
+    font-weight: 700;
+    font-size: 2rem;
+  }
+  .section {
+    margin: 20px 0;
+  }
+  button.listen-btn {
+    background: #ffb03b;
+    border: none;
+    padding: 12px 25px;
+    font-size: 1.1rem;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 700;
+    color: #222;
+    transition: background 0.3s ease;
+    user-select: none;
+  }
+  button.listen-btn.listening {
+    background: #f44336;
+    color: white;
+  }
+  .note-display {
+    margin-top: 10px;
+    font-size: 1.3rem;
+    font-weight: 700;
+    min-height: 1.5em;
+  }
+  #start-game {
+    margin-top: 30px;
+    background: #222;
+    color: #f9d423;
+    padding: 14px 40px;
+    border: none;
+    border-radius: 10px;
+    font-weight: 900;
+    font-size: 1.3rem;
+    cursor: pointer;
+    opacity: 0.5;
+    user-select: none;
+    transition: opacity 0.3s ease;
+  }
+  #start-game.enabled {
+    opacity: 1;
+  }
+  canvas#gameCanvas {
+    display: block;
+    margin-top: 30px;
+    background: #111;
+    border-radius: 10px;
+    box-shadow: 0 0 25px #ffb03b;
+    z-index: 5;
+  }
+</style>
+</head>
+<body>
+
+<div id="menu">
+  <h1>Choisis ta tessiture vocale</h1>
+  
+  <div class="section" id="low-note-section">
+    <div><strong>Note la plus basse :</strong></div>
+    <button class="listen-btn" id="listenLowBtn">Démarrer écoute</button>
+    <div class="note-display" id="lowNoteDisplay">Aucune note détectée</div>
+  </div>
+  
+  <div class="section" id="high-note-section">
+    <div><strong>Note la plus haute :</strong></div>
+    <button class="listen-btn" id="listenHighBtn">Démarrer écoute</button>
+    <div class="note-display" id="highNoteDisplay">Aucune note détectée</div>
+  </div>
+
+  <button id="start-game" disabled>Démarrer le jeu</button>
+</div>
+
+<canvas id="gameCanvas" width="600" height="400" style="display:none;"></canvas>
+
+<script>
+(() => {
+  // -- Utilitaires fréquence → note en notation française --
+  const notesFr = ['do', 'do#', 'ré', 'ré#', 'mi', 'fa', 'fa#', 'sol', 'sol#', 'la', 'la#', 'si'];
+  // On va afficher les # en bémols français pour les demi-tons (ex do# = réb)
+  const notesBemolFr = ['do', 'réb', 'ré', 'mib', 'mi', 'fa', 'solb', 'sol', 'lab', 'la', 'sib', 'si'];
+
+  function freqToMidiNote(freq) {
+    return Math.round(12 * (Math.log2(freq / 440)) + 69);
+  }
+
+  function midiNoteToFreq(midi) {
+    return 440 * Math.pow(2, (midi - 69) / 12);
+  }
+
+  function midiToNoteNameFr(midi) {
+    // midi 60 = do4
+    let octave = Math.floor(midi / 12) - 1;
+    let noteIndex = midi % 12;
+    // Choix entre dièse ou bémol: pour cet exemple on fait bémol si possible
+    // ex: do# = réb, etc.
+    let noteName = notesBemolFr[noteIndex];
+    return noteName + octave;
+  }
+
+  // -- Variables globales --
+  let audioContext;
+  let analyser;
+  let microphone;
+  let dataArray;
+  let isListeningLow = false;
+  let isListeningHigh = false;
+  let animationIdLow, animationIdHigh;
+  let detectedLowMidi = null;
+  let detectedHighMidi = null;
+
+  // Elements DOM
+  const listenLowBtn = document.getElementById('listenLowBtn');
+  const listenHighBtn = document.getElementById('listenHighBtn');
+  const lowNoteDisplay = document.getElementById('lowNoteDisplay');
+  const highNoteDisplay = document.getElementById('highNoteDisplay');
+  const startGameBtn = document.getElementById('start-game');
+  const menuDiv = document.getElementById('menu');
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+
+  // Demande accès micro et setup audio analyser
+  async function setupAudio() {
+    if (!audioContext) {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (!microphone) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        microphone = audioContext.createMediaStreamSource(stream);
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 2048;
+        microphone.connect(analyser);
+        dataArray = new Float32Array(analyser.fftSize);
+      } catch(e) {
+        alert("Impossible d'accéder au microphone. Vérifie les permissions.");
+      }
+    }
+  }
+
+  // Pitch detection par auto-corrélation (simplifiée)
+  // Retourne fréquence détectée ou -1 si non trouvée
+  function autoCorrelate(buffer, sampleRate) {
+    let SIZE = buffer.length;
+    let MAX_SAMPLES = Math.floor(SIZE / 2);
+    let bestOffset = -1;
+    let bestCorrelation = 0;
+    let rms = 0;
+    for (let i = 0; i < SIZE; i++) {
+      let val = buffer[i];
+      rms += val * val;
+    }
+    rms = Math.sqrt(rms / SIZE);
+    if (rms < 0.01) // trop silencieux
+      return -1;
+
+    let lastCorrelation = 1;
+    for (let offset = 0; offset < MAX_SAMPLES; offset++) {
+      let correlation = 0;
+
+      for (let i = 0; i < MAX_SAMPLES; i++) {
+        correlation += Math.abs(buffer[i] - buffer[i + offset]);
+      }
+      correlation = 1 - (correlation / MAX_SAMPLES);
+      if (correlation > 0.9 && correlation > lastCorrelation) {
+        bestCorrelation = correlation;
+        bestOffset = offset;
+      } else if (bestCorrelation > 0.9 && correlation < lastCorrelation) {
+        // Pic détecté
+        break;
+      }
+      lastCorrelation = correlation;
+    }
+    if (bestOffset === -1) return -1;
+    return sampleRate / bestOffset;
+  }
+
+  function startListening(isLow) {
+    setupAudio().then(() => {
+      if (isLow) {
+        isListeningLow = true;
+        listenLowBtn.textContent = "Arrêter écoute";
+        listenLowBtn.classList.add('listening');
+        detectedLowMidi = null;
+        lowNoteDisplay.textContent = "J'écoute...";
+        listenHighBtn.disabled = true;
+        listenLow();
+      } else {
+        isListeningHigh = true;
+        listenHighBtn.textContent = "Arrêter écoute";
+        listenHighBtn.classList.add('listening');
+        detectedHighMidi = null;
+        highNoteDisplay.textContent = "J'écoute...";
+        listenLowBtn.disabled = true;
+        listenHigh();
+      }
+    });
+  }
+
+  function stopListening(isLow) {
+    if (isLow) {
+      isListeningLow = false;
+      listenLowBtn.textContent = "Démarrer écoute";
+      listenLowBtn.classList.remove('listening');
+      listenHighBtn.disabled = false;
+      cancelAnimationFrame(animationIdLow);
+      if (detectedLowMidi === null) lowNoteDisplay.textContent = "Aucune note détectée";
+      checkStartEnabled();
+    } else {
+      isListeningHigh = false;
+      listenHighBtn.textContent = "Démarrer écoute";
+      listenHighBtn.classList.remove('listening');
+      listenLowBtn.disabled = false;
+      cancelAnimationFrame(animationIdHigh);
+      if (detectedHighMidi === null) highNoteDisplay.textContent = "Aucune note détectée";
+      checkStartEnabled();
+    }
+  }
+
+  // Analyse en boucle fréquence micro
+  function listenLow() {
+    analyser.getFloatTimeDomainData(dataArray);
+    let freq = autoCorrelate(dataArray, audioContext.sampleRate);
+    if (freq > 50 && freq < 1500) { // plage possible voix
+      let midi = freqToMidiNote(freq);
+      if (detectedLowMidi === null || midi < detectedLowMidi) {
+        detectedLowMidi = midi;
+        lowNoteDisplay.textContent = midiToNoteNameFr(midi);
+      }
+    }
+    if (isListeningLow) animationIdLow = requestAnimationFrame(listenLow);
+  }
+  function listenHigh() {
+    analyser.getFloatTimeDomainData(dataArray);
+    let freq = autoCorrelate(dataArray, audioContext.sampleRate);
+    if (freq > 50 && freq < 1500) {
+      let midi = freqToMidiNote(freq);
+      if (detectedHighMidi === null || midi > detectedHighMidi) {
+        detectedHighMidi = midi;
+        highNoteDisplay.textContent = midiToNoteNameFr(midi);
+      }
+    }
+    if (isListeningHigh) animationIdHigh = requestAnimationFrame(listenHigh);
+  }
+
+  listenLowBtn.addEventListener('click', () => {
+    if (isListeningLow) {
+      stopListening(true);
+    } else {
+      startListening(true);
+    }
+  });
+  listenHighBtn.addEventListener('click', () => {
+    if (isListeningHigh) {
+      stopListening(false);
+    } else {
+      startListening(false);
+    }
+  });
+
+  // Active bouton démarrer jeu si notes valides
+  function checkStartEnabled() {
+    if (detectedLowMidi !== null && detectedHighMidi !== null && detectedLowMidi < detectedHighMidi) {
+      startGameBtn.disabled = false;
+      startGameBtn.classList.add('enabled');
+    } else {
+      startGameBtn.disabled = true;
+      startGameBtn.classList.remove('enabled');
+    }
+  }
+
+  // --- LE JEU ---
+  // Une balle qui passe dans des trous de hauteur variable.
+  // La balle est contrôlée par la hauteur chantée (par la note détectée en temps réel)
+
+  // Variables jeu
+  let gameRunning = false;
+  let ballY = 0;
+  let ballRadius = 15;
+  let ballX = 100;
+  let gravity = 0.6;
+  let velocityY = 0;
+  let holes = [];
+  let holeWidth = 80;
+  let holeGap = 180; // espace entre trous
+  let speed = 3;
+  let score = 0;
+  let maxHoles = 8;
+  let minMidi = null;
+  let maxMidi = null;
+  let liveMidi = null; // note en cours durant le jeu
+
+  // Setup initial holes
+  function generateHoles() {
+    holes = [];
+    for (let i = 0; i < maxHoles; i++) {
+      // Générer une hauteur entre minMidi et maxMidi (en pixels sur canvas)
+      // On mappe minMidi maxMidi à y = 50 à y=350
+      let randMidi = Math.floor(Math.random() * (maxMidi - minMidi)) + minMidi;
+      let holeY = mapMidiToY(randMidi);
+      holes.push({x: canvas.width + i * holeGap, y: holeY});
+    }
+  }
+
+  function mapMidiToY(midi) {
+    // midi le plus haut = y=50 (en haut), midi le plus bas = y=350 (en bas)
+    let ratio = (midi - minMidi) / (maxMidi - minMidi);
+    return 350 - ratio * 300;
+  }
+
+  function mapFreqToBallY(freq) {
+    if (!freq || freq < 50 || freq > 1500) return ballY;
+    let midi = freqToMidiNote(freq);
+    if (midi < minMidi) midi = minMidi;
+    if (midi > maxMidi) midi = maxMidi;
+    return mapMidiToY(midi);
+  }
+
+  // Détection continue du pitch pendant jeu
+  function getPitchDuringGame() {
+    analyser.getFloatTimeDomainData(dataArray);
+    let freq = autoCorrelate(dataArray, audioContext.sampleRate);
+    if (freq > 50 && freq < 1500) {
+      liveMidi = freqToMidiNote(freq);
+      if (liveMidi < minMidi) liveMidi = minMidi;
+      if (liveMidi > maxMidi) liveMidi = maxMidi;
+    }
+    else {
+      liveMidi = null;
+    }
+    return liveMidi;
+  }
+
+  function drawGame() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // Fond noir avec ombre jaune
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    // Dessiner trous
+    ctx.fillStyle = '#f9d423';
+    holes.forEach(hole => {
+      ctx.beginPath();
+      ctx.rect(hole.x, hole.y - 40, holeWidth, 80);
+      ctx.clearRect(hole.x, hole.y - 40, holeWidth, 80); // trou transparent
+      ctx.strokeStyle = '#ff4e50';
+      ctx.lineWidth = 4;
+      ctx.strokeRect(hole.x, hole.y - 40, holeWidth, 80);
+    });
+
+    // Dessiner balle
+    ctx.beginPath();
+    ctx.fillStyle = '#ffb03b';
+    ctx.shadowColor = '#ffb03b';
+    ctx.shadowBlur = 10;
+    ctx.arc(ballX, ballY, ballRadius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Score
+    ctx.fillStyle = '#ffb03b';
+    ctx.font = 'bold 22px Montserrat';
+    ctx.fillText("Score : " + score, 20, 30);
+  }
+
+  function updateGame() {
+    // Déplacer trous
+    holes.forEach(hole => {
+      hole.x -= speed;
+    });
+    // Supprimer trous sortis
+    if (holes.length && holes[0].x + holeWidth < 0) {
+      holes.shift();
+      // Ajout d’un nouveau trou aléatoire
+      let randMidi = Math.floor(Math.random() * (maxMidi - minMidi)) + minMidi;
+      let holeY = mapMidiToY(randMidi);
+      holes.push({x: canvas.width + holeGap, y: holeY});
+      score++;
+    }
+
+    // Mise à jour hauteur balle par note détectée
+    let freq = getPitchDuringGame();
+    if (freq) {
+      ballY = mapMidiToY(freq);
+    } else {
+      // Pas de note détectée, chute avec gravité
+      velocityY += gravity;
+      ballY += velocityY;
+    }
+
+    // Collision avec trous
+    let inHole = holes.some(hole => {
+      return ballX + ballRadius > hole.x && ballX - ballRadius < hole.x + holeWidth &&
+             ballY > hole.y - 40 && ballY < hole.y + 40;
+    });
+    if (!inHole) {
+      // Perdu : reset jeu
+      gameOver();
+      return;
+    }
+
+    // Limites canvas
+    if (ballY > canvas.height - ballRadius) ballY = canvas.height - ballRadius;
+    if (ballY < ballRadius) ballY = ballRadius;
+  }
+
+  function gameOver() {
+    alert("Partie terminée ! Ton score : " + score);
+    stopGame();
+  }
+
+  function gameLoop() {
+    updateGame();
+    drawGame();
+    if (gameRunning) {
+      requestAnimationFrame(gameLoop);
+    }
+  }
+
+  function startGame() {
+    if (detectedLowMidi === null || detectedHighMidi === null) return;
+    if (detectedLowMidi >= detectedHighMidi) {
+      alert("La note basse doit être plus basse que la note haute !");
+      return;
+    }
+    minMidi = detectedLowMidi;
+    maxMidi = detectedHighMidi;
+
+    menuDiv.style.display = 'none';
+    canvas.style.display = 'block';
+
+    ballY = mapMidiToY((minMidi + maxMidi) / 2);
+    velocityY = 0;
+    score = 0;
+    generateHoles();
+    gameRunning = true;
+    gameLoop();
+  }
+
+  function stopGame() {
+    gameRunning = false;
+    canvas.style.display = 'none';
+    menuDiv.style.display = 'block';
+    detectedLowMidi = null;
+    detectedHighMidi = null;
+    lowNoteDisplay.textContent = "Aucune note détectée";
+    highNoteDisplay.textContent = "Aucune note détectée";
+    startGameBtn.disabled = true;
+    startGameBtn.classList.remove('enabled');
+  }
+
+  startGameBtn.addEventListener('click', startGame);
+
+  // Vérifie si le bouton start doit être activé à chaque note détectée
+  const observer = new MutationObserver(checkStartEnabled);
+  observer.observe(lowNoteDisplay, {childList: true});
+  observer.observe(highNoteDisplay, {childList: true});
+})();
+</script>
+
+</body>
+</html>
+
